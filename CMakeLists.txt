@@ -12,6 +12,8 @@ FetchContent_Declare(mdspan
 )
 FetchContent_MakeAvailable(mdspan)
 
+find_package(X11)
+
 add_library(io src/io.hpp src/io.cpp)
 target_link_libraries(io mdspan)
 
@@ -19,4 +21,4 @@ add_library(model src/model.hpp src/model.cpp)
 target_link_libraries(model mdspan)
 
 add_executable(handwriting src/handwriting.cpp)
-target_link_libraries(handwriting io mdspan model)
+target_link_libraries(handwriting io mdspan model X11)

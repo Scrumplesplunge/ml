@@ -1,5 +1,8 @@
+#include <CImg.h>
+
 #include <cmath>
 #include <concepts>
+#include <fstream>
 #include <iostream>
 #include <random>
 
@@ -72,7 +75,7 @@ void Grade(const Network& network) {
             << '\n';
 }
 
-Network Train() {
+void Train(Network& network) {
   const ml::IdxFile<unsigned char, std::dynamic_extent, 28, 28> images(
       "data/mnist/train-images-idx3-ubyte");
   const ml::IdxFile<unsigned char, std::dynamic_extent> labels(
@@ -86,15 +89,9 @@ Network Train() {
   const std::size_t n = images.extent(0);
   std::cout << n << " images to train with.\n";
 
-  struct {
-    std::ranlux48_base generator{std::random_device()()};
-  } params;
-
-  Network network(params);
-
   Grade(network);
 
-  constexpr int kMaxNumEpochs = 5;
+  constexpr int kMaxNumEpochs = 32;
   for (int epoch = 0; epoch < kMaxNumEpochs; epoch++) {
     int correct = 0;
     for (std::size_t i = 0; i < n; i++) {
@@ -121,12 +118,58 @@ Network Train() {
     std::cout << "\rTraining accuracy: " << float(correct) / n << '\n';
     Grade(network);
   }
+}
 
-  return network;
+Network LoadOrTrain() {
+  struct {
+    std::ranlux48_base generator{std::random_device()()};
+  } params;
+
+  Network network(params);
+
+  try {
+    ml::MappedFile saved("build/network.bin");
+    if (saved.size() != sizeof(network)) {
+      throw std::runtime_error("size mismatch");
+    }
+    std::memcpy(&network, saved.data(), saved.size());
+    return network;
+  } catch (const std::exception& e) {
+    std::cout << e.what() << '\n';
+    Train(network);
+    std::ofstream saved("build/network.bin", std::ios::binary);
+    saved.write(reinterpret_cast<const char*>(&network), sizeof(network));
+    if (!saved.good()) std::cerr << "Failed to save network.\n";
+    return network;
+  }
 }
 
 void Run() {
-  const Network network = Train();
+  const Network network = LoadOrTrain();
+  std::cout << "Testing against custom inputs...\n";
+  for (char c = '0'; c <= '9'; c++) {
+    std::string filename("data/");
+    filename.push_back(c);
+    filename += ".png";
+    cimg_library::CImg<unsigned char> image(filename.c_str());
+    image.autocrop();
+    std::cout << filename << ": autocrop -> " << image.width() << 'x' << image.height() << '\n';
+    const int size = std::max(image.width(), image.height());
+    image.resize(20 * image.width() / size, 20 * image.height() / size, 1, 1,
+                 /*cubic interpolation*/5);
+    std::cout << filename << ": scaling -> " << image.width() << 'x' << image.height() << '\n';
+    cimg_library::CImg<unsigned char> canvas(28, 28, 1, 1, 0);
+    canvas.draw_image(14 - image.width() / 2, 14 - image.height() / 2, image);
+    const std::array<float, 28 * 28> inputs = LoadImage(
+        std::experimental::mdspan<
+            const unsigned char,
+            std::experimental::extents<std::size_t, 28, 28>>(canvas.data()));
+    float outputs[10];
+    ml::Run(network, inputs, outputs);
+    const int guess = ml::Select(std::span<const float, 10>(outputs));
+    std::cout << filename << ": guessed " << guess
+              << " (with p=" << outputs[guess] << ")\n";
+  }
 }
 
 }  // namespace
