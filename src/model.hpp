@@ -54,6 +54,15 @@ struct CompoundModel {
     b.Apply(state.b, state.hidden, outputs);
   }
 
+  void Backwards(State& state,
+                 std::span<const float, num_inputs> inputs,
+                 std::span<const float, num_outputs> output_loss_gradients,
+                 std::span<float, num_inputs> input_loss_gradients) {
+    float inner_gradients[A::num_outputs];
+    b.Backwards(state.b, state.hidden, output_loss_gradients, inner_gradients);
+    a.Backwards(state.a, inputs, inner_gradients, input_loss_gradients);
+  }
+
   void Backpropagate(State& state,
                      std::span<const float, num_inputs> inputs,
                      std::span<const float, num_outputs> output_gradients,
@@ -118,45 +127,31 @@ struct Linear {
     }
   }
 
-  void Backpropagate(State& state,
-                     std::span<const float, num_inputs> inputs,
-                     std::span<const float, num_outputs> output_gradients,
-                     std::span<float, num_inputs> input_gradients,
-                     float learning_rate) {
-    // TODO: Experiment with updating the weights before calculating the
-    // gradient vs. after calculating the gradient to see whether it makes
-    // a difference.
-
+  void Backwards(State& state,
+                 std::span<const float, num_inputs> inputs,
+                 std::span<const float, num_outputs> output_loss_gradients,
+                 std::span<float, num_inputs> input_loss_gradients) {
     // Calculate the loss gradients with respect to the inputs.
     // dL/dx[i] = sum(j) of (dL/dy[j] * dy[j]/dx[i])
     //          = sum(j) of (output_gradients[j] * weights[j][i])
     for (std::size_t x = 0; x < num_inputs; x++) {
       float value = 0;
       for (std::size_t y = 0; y < num_outputs; y++) {
-        value += output_gradients[y] * weights[y][x];
-        if (std::isnan(value)) {
-          std::cout << "output_gradients[" << y << "] = " << output_gradients[y]
-                    << "\n"
-                    << "weights[" << y << "][" << x << "] = " << weights[y][x]
-                    << "\n";
-          std::abort();
-        }
+        value += output_loss_gradients[y] * weights[y][x];
       }
-      input_gradients[x] = value;
+      input_loss_gradients[x] = value;
     }
+  }
 
+  void UpdateWeights(std::span<const float, num_inputs> inputs,
+                     std::span<const float, num_outputs> output_gradients,
+                     float learning_rate) {
     // Update the weights.
     for (std::size_t y = 0; y < num_outputs; y++) {
       for (std::size_t x = 0; x < num_inputs; x++) {
         // dL/dw[j][i] = dL/dy[j] * dy[j]/dw[i]
         //             = output_gradients[j] * state.inputs[i]
         weights[y][x] -= learning_rate * inputs[x] * output_gradients[y];
-        if (std::isnan(weights[y][x])) {
-          std::cout << "state.inputs[" << x << "] = " << inputs[x] << "\n"
-                    << "output_gradients[" << y << "] = " << output_gradients[y]
-                    << "\n";
-          std::abort();
-        }
       }
     }
 
@@ -166,10 +161,18 @@ struct Linear {
       //          = output_gradients[j] * 1
       biases[y] -= learning_rate * output_gradients[y];
     }
+  }
 
-    // std::cout << "backwards: ";
-    // for (float x : input_gradients) std::cout << x << '\t';
-    // std::cout << '\n' << std::flush;
+  void Backpropagate(State& state,
+                     std::span<const float, num_inputs> inputs,
+                     std::span<const float, num_outputs> output_gradients,
+                     std::span<float, num_inputs> input_gradients,
+                     float learning_rate) {
+    // TODO: Experiment with updating the weights before calculating the
+    // gradient vs. after calculating the gradient to see whether it makes
+    // a difference.
+    Backwards(state, inputs, output_gradients, input_gradients);
+    UpdateWeights(inputs, output_gradients, learning_rate);
   }
 
   float weights[num_outputs][num_inputs];
@@ -198,15 +201,18 @@ struct Relu {
     }
   }
 
+  void Backwards(State& state, std::span<const float, n> inputs,
+                 std::span<const float, n> output_loss_gradients,
+                 std::span<float, n> input_loss_gradients) {
+    for (std::size_t i = 0; i < n; i++) {
+      input_loss_gradients[i] = inputs[i] > 0 ? output_loss_gradients[i] : 0.0f;
+    }
+  }
+
   void Backpropagate(State& state, std::span<const float, n> inputs,
                      std::span<const float, n> output_gradients,
                      std::span<float, n> input_gradients, float learning_rate) {
-    for (std::size_t i = 0; i < n; i++) {
-      input_gradients[i] = inputs[i] > 0 ? output_gradients[i] : 0.0f;
-    }
-    // std::cout << "backwards: ";
-    // for (float x : input_gradients) std::cout << x << '\t';
-    // std::cout << '\n' << std::flush;
+    Backwards(state, inputs, output_gradients, input_gradients);
   }
 };
 
@@ -268,22 +274,28 @@ struct Normalize {
     }
   }
 
-  void Backpropagate(State& state, std::span<const float, n> inputs,
-                     std::span<const float, n> output_gradients,
-                     std::span<float, n> input_gradients, float learning_rate) {
+  void Backwards(State& state, std::span<const float, n> inputs,
+                 std::span<const float, n> output_loss_gradients,
+                 std::span<float, n> input_loss_gradients) {
     const auto [mean, factor] = Analyze(inputs);
     for (std::size_t i = 0; i < n; i++) {
       float loss_gradient = 0;
       for (std::size_t j = 0; j < n; j++) {
-        const float dldyj = output_gradients[j];
+        const float dldyj = output_loss_gradients[j];
         const float xi = inputs[i], xj = inputs[j];
         const float dyjdxi = (((i == j) - 1.0f / n) -
                               (xi - mean) * (xj - mean) * factor * factor) *
                              factor;
         loss_gradient += dldyj * dyjdxi;
       }
-      input_gradients[i] = loss_gradient;
+      input_loss_gradients[i] = loss_gradient;
     }
+  }
+
+  void Backpropagate(State& state, std::span<const float, n> inputs,
+                     std::span<const float, n> output_gradients,
+                     std::span<float, n> input_gradients, float learning_rate) {
+    Backwards(state, inputs, output_gradients, input_gradients);
   }
 };
 
@@ -309,19 +321,23 @@ struct Sigmoid {
     }
   }
 
-  void Backpropagate(State& state, std::span<const float, n> inputs,
-                     std::span<const float, n> output_gradients,
-                     std::span<float, n> input_gradients, float learning_rate) {
+  void Backwards(State& state, std::span<const float, n> inputs,
+                 std::span<const float, n> output_loss_gradients,
+                 std::span<float, n> input_loss_gradients) {
     //     y = 1 / (1 + e^-x)
     // dy/dx = ((1 + e^-x) * 0 - 1 * (-e^-x)) / (1 + e^-x)^2
     //       =                         e^-x   / (1 + e^-x)^2
     for (std::size_t i = 0; i < n; i++) {
       const float x = std::exp(-inputs[i]);
-      input_gradients[i] = x / ((1 + x) * (1 + x));
+      input_loss_gradients[i] =
+          output_loss_gradients[i] * x / ((1 + x) * (1 + x));
     }
-    // std::cout << "backwards: ";
-    // for (float x : input_gradients) std::cout << x << '\t';
-    // std::cout << '\n' << std::flush;
+  }
+
+  void Backpropagate(State& state, std::span<const float, n> inputs,
+                     std::span<const float, n> output_gradients,
+                     std::span<float, n> input_gradients, float learning_rate) {
+    Backwards(state, inputs, output_gradients, input_gradients);
   }
 };
 
@@ -358,9 +374,9 @@ struct Softmax {
     for (std::size_t i = 0; i < n; i++) outputs[i] *= factor;
   }
 
-  void Backpropagate(State& state, std::span<const float, n> inputs,
-                     std::span<const float, n> output_gradients,
-                     std::span<float, n> input_gradients, float learning_rate) {
+  void Backwards(State& state, std::span<const float, n> inputs,
+                 std::span<const float, n> output_loss_gradients,
+                 std::span<float, n> input_loss_gradients) {
     float e[n];
     float total = 0;
     for (std::size_t i = 0; i < n; i++) {
@@ -371,17 +387,19 @@ struct Softmax {
     for (std::size_t i = 0; i < n; i++) {
       float loss_gradient = 0;
       for (std::size_t j = 0; j < n; j++) {
-        const float dldyj = output_gradients[j];
+        const float dldyj = output_loss_gradients[j];
         const float k = i == j ? e[i] : 1.0f;
         const float dyjdxi = (total * (i == j) - e[j]) * e[i] * factor;
         loss_gradient += dldyj * dyjdxi;
       }
-      input_gradients[i] = loss_gradient;
+      input_loss_gradients[i] = loss_gradient;
     }
+  }
 
-    // std::cout << "backwards: ";
-    // for (float x : input_gradients) std::cout << x << '\t';
-    // std::cout << '\n' << std::flush;
+  void Backpropagate(State& state, std::span<const float, n> inputs,
+                     std::span<const float, n> output_gradients,
+                     std::span<float, n> input_gradients, float learning_rate) {
+    Backwards(state, inputs, output_gradients, input_gradients);
   }
 };
 
@@ -395,63 +413,6 @@ void Train(M& model, std::span<const float, M::num_inputs> inputs,
   float outputs[M::num_outputs];
   typename M::State state;
   model.Apply(state, inputs, outputs);
-
-  // std::cout << "layers:\n";
-  // std::cout << "  ";
-  // for (float x : state.a.a.a.a.a.a.a.a.b.inputs) {
-  //   std::cout << x << '\t';
-  // }
-  // std::cout << '\n';
-  // std::cout << "  ";
-  // for (float x : state.a.a.a.a.a.a.a.b.inputs) {
-  //   std::cout << x << '\t';
-  // }
-  // std::cout << '\n';
-  // std::cout << "  ";
-  // for (float x : state.a.a.a.a.a.a.b.inputs) {
-  //   std::cout << x << '\t';
-  // }
-  // std::cout << '\n';
-  // std::cout << "  ";
-  // for (float x : state.a.a.a.a.a.b.inputs) {
-  //   std::cout << x << '\t';
-  // }
-  // std::cout << '\n';
-  // std::cout << "  ";
-  // for (float x : state.a.a.a.a.b.inputs) {
-  //   std::cout << x << '\t';
-  // }
-  // std::cout << '\n';
-  // std::cout << "  ";
-  // for (float x : state.a.a.a.b.inputs) {
-  //   std::cout << x << '\t';
-  // }
-  // std::cout << '\n';
-  // std::cout << "  ";
-  // for (float x : state.a.a.b.inputs) {
-  //   std::cout << x << '\t';
-  // }
-  // std::cout << '\n';
-  // std::cout << "  ";
-  // for (float x : state.a.b.inputs) {
-  //   std::cout << x << '\t';
-  // }
-  // std::cout << '\n';
-  // std::cout << "  ";
-  // for (float x : state.b.inputs) {
-  //   std::cout << x << '\t';
-  // }
-  // std::cout << '\n';
-
-  // std::cout << "expected: ";
-  // for (std::size_t i = 0; i < M::num_outputs; i++) {
-  //   std::cout << expected_outputs[i] << '\t';
-  // }
-  // std::cout << "\nactual:   ";
-  // for (std::size_t i = 0; i < M::num_outputs; i++) {
-  //   std::cout << outputs[i] << '\t';
-  // }
-  // std::cout << "\n\n";
 
   float gradients[M::num_outputs];
   for (std::size_t i = 0; i < M::num_outputs; i++) {
@@ -468,10 +429,6 @@ void Train(M& model, std::span<const float, M::num_inputs> inputs,
   // top level.
   float input_gradients[M::num_inputs];
   model.Backpropagate(state, inputs, gradients, input_gradients, learning_rate);
-
-  std::cout << "backwards: ";
-  for (float x : input_gradients) std::cout << x << '\t';
-  std::cout << '\n' << std::flush;
 }
 
 template <Model M>

@@ -10,9 +10,8 @@ namespace handwriting {
 namespace {
 
 using Network =
-    decltype(ml::linear<28 * 28, 16> | ml::relu<16> | ml::linear<16, 16> |
-             ml::relu<16> | ml::linear<16, 10> | ml::normalize<10> |
-             ml::softmax<10>)::Type;
+    decltype(ml::linear<28 * 28, 16> | ml::sigmoid<16> | ml::linear<16, 16> |
+             ml::sigmoid<16> | ml::linear<16, 10> | ml::softmax<10>)::Type;
 
 std::array<float, 28 * 28> LoadImage(
     std::experimental::mdspan<const unsigned char,
@@ -45,7 +44,7 @@ void Grade(const Network& network) {
   float correct_confidence = 0;
   float incorrect_confidence = 0;
   for (std::size_t i = 0; i < n; i++) {
-    if (i % 100 == 0) {
+    if (i % 1000 == 0) {
       std::cout << "\rGrading (" << i << "/" << n << ")..." << std::flush;
     }
     const std::array<float, 28 * 28> inputs =
@@ -73,16 +72,6 @@ void Grade(const Network& network) {
             << '\n';
 }
 
-float Loss(std::span<const float, 10> expected,
-           std::span<const float, 10> actual) {
-  float loss = 0;
-  for (std::size_t i = 0; i < 10; i++) {
-    const float diff = actual[i] - expected[i];
-    loss += diff * diff;
-  }
-  return loss;
-}
-
 Network Train() {
   const ml::IdxFile<unsigned char, std::dynamic_extent, 28, 28> images(
       "data/mnist/train-images-idx3-ubyte");
@@ -105,11 +94,9 @@ Network Train() {
 
   Grade(network);
 
-  constexpr int kMaxNumEpochs = 100;
+  constexpr int kMaxNumEpochs = 5;
   for (int epoch = 0; epoch < kMaxNumEpochs; epoch++) {
     int correct = 0;
-    const float learning_rate = 0.001;  //std::exp(-2.0f - epoch);
-    std::cout << "Learning rate " << learning_rate << "\n";
     for (std::size_t i = 0; i < n; i++) {
       const std::size_t index = 1337 * i % n;
       const std::array<float, 28 * 28> inputs =
@@ -125,8 +112,9 @@ Network Train() {
       if (ml::Select(std::span<const float, 10>(outputs)) == label) {
         correct++;
       }
-      ml::Train(network, inputs, expected_outputs, learning_rate);
-      if (i % 100 == 0) {
+      constexpr float kLearningRate = 0.01;
+      ml::Train(network, inputs, expected_outputs, kLearningRate);
+      if (i % 1000 == 0) {
         std::cout << "\rTraining (" << i << "/" << n << ")..." << std::flush;
       }
     }
