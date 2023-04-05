@@ -120,6 +120,8 @@ Network LoadOrTrain() {
       throw std::runtime_error("size mismatch");
     }
     std::memcpy(&network, saved.data(), saved.size());
+    std::cout << "Loaded pre-trained network.\n";
+    Grade(network);
     return network;
   } catch (const std::exception& e) {
     std::cout << e.what() << '\n';
