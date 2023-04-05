@@ -43,21 +43,19 @@ struct CompoundModel {
   explicit CompoundModel(T&& params) : a(params), b(params) {}
 
   struct State {
-    std::span<float, num_inputs> inputs() {
-      return std::invoke(&A::State::inputs, a);
-    }
-
     A::State a;
+    float hidden[A::num_outputs];
     B::State b;
   };
 
-  void Apply(State& state,
+  void Apply(State& state, std::span<const float, num_inputs> inputs,
              std::span<float, num_outputs> outputs) const noexcept {
-    a.Apply(state.a, std::invoke(&B::State::inputs, state.b));
-    b.Apply(state.b, outputs);
+    a.Apply(state.a, inputs, state.hidden);
+    b.Apply(state.b, state.hidden, outputs);
   }
 
   void Backpropagate(State& state,
+                     std::span<const float, num_inputs> inputs,
                      std::span<const float, num_outputs> output_gradients,
                      std::span<float, num_inputs> input_gradients,
                      float learning_rate) {
@@ -67,8 +65,10 @@ struct CompoundModel {
     // a time. Fixing this seems to require flattening the sequence rather than
     // using this naive recursive approach.
     float inner_gradients[B::num_inputs];
-    b.Backpropagate(state.b, output_gradients, inner_gradients, learning_rate);
-    a.Backpropagate(state.a, inner_gradients, input_gradients, learning_rate);
+    b.Backpropagate(state.b, state.hidden, output_gradients, inner_gradients,
+                    learning_rate);
+    a.Backpropagate(state.a, inputs, inner_gradients, input_gradients,
+                    learning_rate);
   }
 
   A a;
@@ -94,9 +94,7 @@ struct Linear {
       std::uniform_random_bit_generator<
           std::decay_t<decltype(std::declval<P>().generator)>>;
 
-  struct State {
-    float inputs[num_inputs];
-  };
+  struct State {};
 
   template <Params<Linear> P>
   explicit Linear(P&& params) {
@@ -108,18 +106,20 @@ struct Linear {
   }
 
   void Apply(State& state,
+             std::span<const float, num_inputs> inputs,
              std::span<float, num_outputs> outputs) const noexcept {
     for (std::size_t y = 0; y < num_outputs; y++) {
       float value = biases[y];
       const float* w = weights[y];
       for (std::size_t x = 0; x < num_inputs; x++) {
-        value += state.inputs[x] * w[x];
+        value += inputs[x] * w[x];
       }
       outputs[y] = value;
     }
   }
 
   void Backpropagate(State& state,
+                     std::span<const float, num_inputs> inputs,
                      std::span<const float, num_outputs> output_gradients,
                      std::span<float, num_inputs> input_gradients,
                      float learning_rate) {
@@ -150,9 +150,9 @@ struct Linear {
       for (std::size_t x = 0; x < num_inputs; x++) {
         // dL/dw[j][i] = dL/dy[j] * dy[j]/dw[i]
         //             = output_gradients[j] * state.inputs[i]
-        weights[y][x] -= learning_rate * state.inputs[x] * output_gradients[y];
+        weights[y][x] -= learning_rate * inputs[x] * output_gradients[y];
         if (std::isnan(weights[y][x])) {
-          std::cout << "state.inputs[" << x << "] = " << state.inputs[x] << "\n"
+          std::cout << "state.inputs[" << x << "] = " << inputs[x] << "\n"
                     << "output_gradients[" << y << "] = " << output_gradients[y]
                     << "\n";
           std::abort();
@@ -189,20 +189,20 @@ struct Relu {
   template <typename T>
   explicit Relu(T&&) {}
 
-  struct State {
-    float inputs[num_inputs];
-  };
+  struct State {};
 
-  static void Apply(State& state, std::span<float, n> outputs) noexcept {
+  static void Apply(State& state, std::span<const float, n> inputs,
+                    std::span<float, n> outputs) noexcept {
     for (std::size_t i = 0; i < n; i++) {
-      outputs[i] = std::max<float>(0, state.inputs[i]);
+      outputs[i] = std::max<float>(0, inputs[i]);
     }
   }
 
-  void Backpropagate(State& state, std::span<const float, n> output_gradients,
+  void Backpropagate(State& state, std::span<const float, n> inputs,
+                     std::span<const float, n> output_gradients,
                      std::span<float, n> input_gradients, float learning_rate) {
     for (std::size_t i = 0; i < n; i++) {
-      input_gradients[i] = state.inputs[i] > 0 ? output_gradients[i] : 0.0f;
+      input_gradients[i] = inputs[i] > 0 ? output_gradients[i] : 0.0f;
     }
     // std::cout << "backwards: ";
     // for (float x : input_gradients) std::cout << x << '\t';
@@ -223,9 +223,7 @@ struct Normalize {
   template <typename T>
   explicit Normalize(T&&) {}
 
-  struct State {
-    float inputs[num_inputs];
-  };
+  struct State {};
 
   //        y[i] = (x[i] - mean(x)) / sqrt(variance(x) + epsilon)
   //    dL/dx[i] = sum(j) of (dL/dy[j] * dy[j]/dx[i])
@@ -262,21 +260,23 @@ struct Normalize {
     return {.mean = mean, .factor = factor};
   }
 
-  static void Apply(State& state, std::span<float, n> outputs) noexcept {
-    const auto [mean, factor] = Analyze(state.inputs);
+  static void Apply(State& state, std::span<const float, n> inputs,
+                    std::span<float, n> outputs) noexcept {
+    const auto [mean, factor] = Analyze(inputs);
     for (std::size_t i = 0; i < n; i++) {
-      outputs[i] = (state.inputs[i] - mean) * factor;
+      outputs[i] = (inputs[i] - mean) * factor;
     }
   }
 
-  void Backpropagate(State& state, std::span<const float, n> output_gradients,
+  void Backpropagate(State& state, std::span<const float, n> inputs,
+                     std::span<const float, n> output_gradients,
                      std::span<float, n> input_gradients, float learning_rate) {
-    const auto [mean, factor] = Analyze(state.inputs);
+    const auto [mean, factor] = Analyze(inputs);
     for (std::size_t i = 0; i < n; i++) {
       float loss_gradient = 0;
       for (std::size_t j = 0; j < n; j++) {
         const float dldyj = output_gradients[j];
-        const float xi = state.inputs[i], xj = state.inputs[j];
+        const float xi = inputs[i], xj = inputs[j];
         const float dyjdxi = (((i == j) - 1.0f / n) -
                               (xi - mean) * (xj - mean) * factor * factor) *
                              factor;
@@ -300,23 +300,23 @@ struct Sigmoid {
   template <typename T>
   explicit Sigmoid(T&&) {}
 
-  struct State {
-    float inputs[num_inputs];
-  };
+  struct State {};
 
-  static void Apply(State& state, std::span<float, n> outputs) noexcept {
+  static void Apply(State& state, std::span<const float, n> inputs,
+                    std::span<float, n> outputs) noexcept {
     for (std::size_t i = 0; i < n; i++) {
-      outputs[i] = 1.0f / (1.0f + std::exp(-state.inputs[i]));
+      outputs[i] = 1.0f / (1.0f + std::exp(-inputs[i]));
     }
   }
 
-  void Backpropagate(State& state, std::span<const float, n> output_gradients,
+  void Backpropagate(State& state, std::span<const float, n> inputs,
+                     std::span<const float, n> output_gradients,
                      std::span<float, n> input_gradients, float learning_rate) {
     //     y = 1 / (1 + e^-x)
     // dy/dx = ((1 + e^-x) * 0 - 1 * (-e^-x)) / (1 + e^-x)^2
     //       =                         e^-x   / (1 + e^-x)^2
     for (std::size_t i = 0; i < n; i++) {
-      const float x = std::exp(-state.inputs[i]);
+      const float x = std::exp(-inputs[i]);
       input_gradients[i] = x / ((1 + x) * (1 + x));
     }
     // std::cout << "backwards: ";
@@ -338,9 +338,7 @@ struct Softmax {
   template <typename T>
   explicit Softmax(T&&) {}
 
-  struct State {
-    float inputs[num_inputs];
-  };
+  struct State {};
 
   //        y[i] = e^x[i] / (sum(j) of e^x[j])
   //                v                    du/dx             - u        dv/dx
@@ -349,22 +347,24 @@ struct Softmax {
   //             = (total * (i == j) - e^x[j]) * e^x[i] / (total * total)
   //    dL/dx[i] = sum(j) of (dL/dy[j] * dy[j]/dx[i])
 
-  static void Apply(State& state, std::span<float, n> outputs) noexcept {
+  static void Apply(State& state, std::span<const float, n> inputs,
+                    std::span<float, n> outputs) noexcept {
     float total = 0;
     for (std::size_t i = 0; i < n; i++) {
-      outputs[i] = std::exp(state.inputs[i]);
+      outputs[i] = std::exp(inputs[i]);
       total += outputs[i];
     }
     const float factor = 1.0f / total;
     for (std::size_t i = 0; i < n; i++) outputs[i] *= factor;
   }
 
-  void Backpropagate(State& state, std::span<const float, n> output_gradients,
+  void Backpropagate(State& state, std::span<const float, n> inputs,
+                     std::span<const float, n> output_gradients,
                      std::span<float, n> input_gradients, float learning_rate) {
     float e[n];
     float total = 0;
     for (std::size_t i = 0; i < n; i++) {
-      e[i] = std::exp(state.inputs[i]);
+      e[i] = std::exp(inputs[i]);
       total += e[i];
     }
     const float factor = 1.0f / (total * total);
@@ -393,12 +393,8 @@ void Train(M& model, std::span<const float, M::num_inputs> inputs,
            std::span<const float, M::num_outputs> expected_outputs,
            float learning_rate) {
   float outputs[M::num_outputs];
-  // TODO: Figure out whether this copy can be avoided.
   typename M::State state;
-  const std::span<float, M::num_inputs> state_inputs =
-      std::invoke(&M::State::inputs, state);
-  for (std::size_t i = 0; i < M::num_inputs; i++) state_inputs[i] = inputs[i];
-  model.Apply(state, outputs);
+  model.Apply(state, inputs, outputs);
 
   // std::cout << "layers:\n";
   // std::cout << "  ";
@@ -471,7 +467,7 @@ void Train(M& model, std::span<const float, M::num_inputs> inputs,
   // TODO: Figure out if we can avoid the redundant gradient calculation at the
   // top level.
   float input_gradients[M::num_inputs];
-  model.Backpropagate(state, gradients, input_gradients, learning_rate);
+  model.Backpropagate(state, inputs, gradients, input_gradients, learning_rate);
 
   std::cout << "backwards: ";
   for (float x : input_gradients) std::cout << x << '\t';
@@ -481,12 +477,8 @@ void Train(M& model, std::span<const float, M::num_inputs> inputs,
 template <Model M>
 void Run(const M& model, std::span<const float, M::num_inputs> inputs,
          std::span<float, M::num_outputs> outputs) {
-  // TODO: Figure out whether this copy can be avoided.
   typename M::State state;
-  const std::span<float, M::num_inputs> state_inputs =
-      std::invoke(&M::State::inputs, state);
-  for (std::size_t i = 0; i < M::num_inputs; i++) state_inputs[i] = inputs[i];
-  model.Apply(state, outputs);
+  model.Apply(state, inputs, outputs);
 }
 
 template <std::size_t n>
