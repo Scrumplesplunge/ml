@@ -1,0 +1,501 @@
+#ifndef MODEL_HPP_
+#define MODEL_HPP_
+
+#include <iostream>
+
+#include <cmath>
+#include <concepts>
+#include <experimental/mdspan>
+#include <functional>
+#include <random>
+#include <span>
+#include <stdexcept>
+
+namespace ml {
+
+template <typename T>
+concept Model = requires () {
+  { T::num_inputs } -> std::same_as<const std::size_t&>;
+  { T::num_outputs } -> std::same_as<const std::size_t&>;
+};
+
+template <Model T>
+struct Factory {
+  using Type = T;
+};
+
+template <typename T, typename M>
+concept Params = requires () {
+  requires M::template params<T>;
+};
+
+template <Model A, Model B>
+requires (A::num_outputs == B::num_inputs)
+struct CompoundModel {
+  static constexpr std::size_t num_inputs = A::num_inputs;
+  static constexpr std::size_t num_outputs = B::num_outputs;
+
+  template <typename T>
+  static constexpr bool params = Params<T, A> && Params<T, B>;
+
+  template <typename T>
+  requires Params<T, CompoundModel>
+  explicit CompoundModel(T&& params) : a(params), b(params) {}
+
+  struct State {
+    std::span<float, num_inputs> inputs() {
+      return std::invoke(&A::State::inputs, a);
+    }
+
+    A::State a;
+    B::State b;
+  };
+
+  void Apply(State& state,
+             std::span<float, num_outputs> outputs) const noexcept {
+    a.Apply(state.a, std::invoke(&B::State::inputs, state.b));
+    b.Apply(state.b, outputs);
+  }
+
+  void Backpropagate(State& state,
+                     std::span<const float, num_outputs> output_gradients,
+                     std::span<float, num_inputs> input_gradients,
+                     float learning_rate) {
+    // TODO: This is somewhat inefficient since for a sequence of nested
+    // CompoundModels it will stack up a bunch of arrays on the stack for each
+    // set of intermediate gradients even though we only ever need one set at
+    // a time. Fixing this seems to require flattening the sequence rather than
+    // using this naive recursive approach.
+    float inner_gradients[B::num_inputs];
+    b.Backpropagate(state.b, output_gradients, inner_gradients, learning_rate);
+    a.Backpropagate(state.a, inner_gradients, input_gradients, learning_rate);
+  }
+
+  A a;
+  B b;
+};
+
+template <Model A, Model B>
+consteval Factory<CompoundModel<A, B>> operator|(Factory<A>, Factory<B>) {
+  return {};
+}
+
+template <Model T, Params<T> P>
+constexpr T Create(Factory<T>, P&& params) { return T(params); }
+
+template <std::size_t i, std::size_t o>
+struct Linear {
+  static constexpr std::size_t num_inputs = i;
+  static constexpr std::size_t num_outputs = o;
+
+  template <typename P>
+  static constexpr bool params =
+      requires(P p) { p.generator; } &&
+      std::uniform_random_bit_generator<
+          std::decay_t<decltype(std::declval<P>().generator)>>;
+
+  struct State {
+    float inputs[num_inputs];
+  };
+
+  template <Params<Linear> P>
+  explicit Linear(P&& params) {
+    std::normal_distribution<float> f;
+    for (auto& row : weights) {
+      for (auto& cell : row) cell = f(params.generator);
+    }
+    for (auto& bias : biases) bias = f(params.generator);
+  }
+
+  void Apply(State& state,
+             std::span<float, num_outputs> outputs) const noexcept {
+    for (std::size_t y = 0; y < num_outputs; y++) {
+      float value = biases[y];
+      const float* w = weights[y];
+      for (std::size_t x = 0; x < num_inputs; x++) {
+        value += state.inputs[x] * w[x];
+      }
+      outputs[y] = value;
+    }
+  }
+
+  void Backpropagate(State& state,
+                     std::span<const float, num_outputs> output_gradients,
+                     std::span<float, num_inputs> input_gradients,
+                     float learning_rate) {
+    // TODO: Experiment with updating the weights before calculating the
+    // gradient vs. after calculating the gradient to see whether it makes
+    // a difference.
+
+    // Calculate the loss gradients with respect to the inputs.
+    // dL/dx[i] = sum(j) of (dL/dy[j] * dy[j]/dx[i])
+    //          = sum(j) of (output_gradients[j] * weights[j][i])
+    for (std::size_t x = 0; x < num_inputs; x++) {
+      float value = 0;
+      for (std::size_t y = 0; y < num_outputs; y++) {
+        value += output_gradients[y] * weights[y][x];
+        if (std::isnan(value)) {
+          std::cout << "output_gradients[" << y << "] = " << output_gradients[y]
+                    << "\n"
+                    << "weights[" << y << "][" << x << "] = " << weights[y][x]
+                    << "\n";
+          std::abort();
+        }
+      }
+      input_gradients[x] = value;
+    }
+
+    // Update the weights.
+    for (std::size_t y = 0; y < num_outputs; y++) {
+      for (std::size_t x = 0; x < num_inputs; x++) {
+        // dL/dw[j][i] = dL/dy[j] * dy[j]/dw[i]
+        //             = output_gradients[j] * state.inputs[i]
+        weights[y][x] -= learning_rate * state.inputs[x] * output_gradients[y];
+        if (std::isnan(weights[y][x])) {
+          std::cout << "state.inputs[" << x << "] = " << state.inputs[x] << "\n"
+                    << "output_gradients[" << y << "] = " << output_gradients[y]
+                    << "\n";
+          std::abort();
+        }
+      }
+    }
+
+    // Update the biases.
+    for (std::size_t y = 0; y < num_outputs; y++) {
+      // dL/db[j] = dL/dy[j] * dy[j]/db[j]
+      //          = output_gradients[j] * 1
+      biases[y] -= learning_rate * output_gradients[y];
+    }
+
+    // std::cout << "backwards: ";
+    // for (float x : input_gradients) std::cout << x << '\t';
+    // std::cout << '\n' << std::flush;
+  }
+
+  float weights[num_outputs][num_inputs];
+  float biases[num_outputs];
+};
+
+template <std::size_t i, std::size_t o>
+inline constexpr Factory<Linear<i, o>> linear;
+
+template <std::size_t n>
+struct Relu {
+  static constexpr std::size_t num_inputs = n;
+  static constexpr std::size_t num_outputs = n;
+  template <typename T>
+  static constexpr bool params = true;
+
+  template <typename T>
+  explicit Relu(T&&) {}
+
+  struct State {
+    float inputs[num_inputs];
+  };
+
+  static void Apply(State& state, std::span<float, n> outputs) noexcept {
+    for (std::size_t i = 0; i < n; i++) {
+      outputs[i] = std::max<float>(0, state.inputs[i]);
+    }
+  }
+
+  void Backpropagate(State& state, std::span<const float, n> output_gradients,
+                     std::span<float, n> input_gradients, float learning_rate) {
+    for (std::size_t i = 0; i < n; i++) {
+      input_gradients[i] = state.inputs[i] > 0 ? output_gradients[i] : 0.0f;
+    }
+    // std::cout << "backwards: ";
+    // for (float x : input_gradients) std::cout << x << '\t';
+    // std::cout << '\n' << std::flush;
+  }
+};
+
+template <std::size_t n>
+inline constexpr Factory<Relu<n>> relu;
+
+template <std::size_t n>
+struct Normalize {
+  static constexpr std::size_t num_inputs = n;
+  static constexpr std::size_t num_outputs = n;
+  template <typename T>
+  static constexpr bool params = true;
+
+  template <typename T>
+  explicit Normalize(T&&) {}
+
+  struct State {
+    float inputs[num_inputs];
+  };
+
+  //        y[i] = (x[i] - mean(x)) / sqrt(variance(x) + epsilon)
+  //    dL/dx[i] = sum(j) of (dL/dy[j] * dy[j]/dx[i])
+  //     f[i](x) = x[i] - mean(x)
+  //        s(x) = sqrt(variance(x) + epsilon)
+  //        y[i] = f[i](x) / s(x)
+  // df[i]/dx[i] = -1/n + 1
+  // df[j]/dx[i] = -1/n
+  //    ds/dx[i] = (x[i] - mean(x)) / s(x)                                   (*)
+  //                v      du/dx       - u         dv/dx
+  // dy[j]/dx[i] = ((i == j) - 1/n) / s(x) -
+  //               (x[i] - mean(x))(x[j] - mean(x)) / s(x)^3
+  //             = ((i == j) - 1/n) * factor -
+  //               (x[i] - mean) * (x[j] - mean) * (factor * factor * factor)
+  //    dL/dx[i] = sum(j) of (dL/dy[j] * dy[j]/dx[i])
+  //
+  // (*) The proof for this doesn't fit in this comment, but involves using the
+  // chain rule for sqrt(u) and u = variance(x) + epsilon.
+
+  struct Components {
+    float mean;
+    float factor;
+  };
+
+  static Components Analyze(std::span<const float, n> values) noexcept {
+    float sum = 0;
+    for (float x : values) sum += x;
+    const float mean = sum / n;
+    float variance_sum = 0;
+    for (float x : values) variance_sum += (x - mean) * (x - mean);
+    const float variance = variance_sum / n;
+    constexpr float kEpsilon = 1e-3;
+    const float factor = 1.0f / std::sqrt(variance + kEpsilon);
+    return {.mean = mean, .factor = factor};
+  }
+
+  static void Apply(State& state, std::span<float, n> outputs) noexcept {
+    const auto [mean, factor] = Analyze(state.inputs);
+    for (std::size_t i = 0; i < n; i++) {
+      outputs[i] = (state.inputs[i] - mean) * factor;
+    }
+  }
+
+  void Backpropagate(State& state, std::span<const float, n> output_gradients,
+                     std::span<float, n> input_gradients, float learning_rate) {
+    const auto [mean, factor] = Analyze(state.inputs);
+    for (std::size_t i = 0; i < n; i++) {
+      float loss_gradient = 0;
+      for (std::size_t j = 0; j < n; j++) {
+        const float dldyj = output_gradients[j];
+        const float xi = state.inputs[i], xj = state.inputs[j];
+        const float dyjdxi = (((i == j) - 1.0f / n) -
+                              (xi - mean) * (xj - mean) * factor * factor) *
+                             factor;
+        loss_gradient += dldyj * dyjdxi;
+      }
+      input_gradients[i] = loss_gradient;
+    }
+  }
+};
+
+template <std::size_t n>
+inline constexpr Factory<Normalize<n>> normalize;
+
+template <std::size_t n>
+struct Sigmoid {
+  static constexpr std::size_t num_inputs = n;
+  static constexpr std::size_t num_outputs = n;
+  template <typename T>
+  static constexpr bool params = true;
+
+  template <typename T>
+  explicit Sigmoid(T&&) {}
+
+  struct State {
+    float inputs[num_inputs];
+  };
+
+  static void Apply(State& state, std::span<float, n> outputs) noexcept {
+    for (std::size_t i = 0; i < n; i++) {
+      outputs[i] = 1.0f / (1.0f + std::exp(-state.inputs[i]));
+    }
+  }
+
+  void Backpropagate(State& state, std::span<const float, n> output_gradients,
+                     std::span<float, n> input_gradients, float learning_rate) {
+    //     y = 1 / (1 + e^-x)
+    // dy/dx = ((1 + e^-x) * 0 - 1 * (-e^-x)) / (1 + e^-x)^2
+    //       =                         e^-x   / (1 + e^-x)^2
+    for (std::size_t i = 0; i < n; i++) {
+      const float x = std::exp(-state.inputs[i]);
+      input_gradients[i] = x / ((1 + x) * (1 + x));
+    }
+    // std::cout << "backwards: ";
+    // for (float x : input_gradients) std::cout << x << '\t';
+    // std::cout << '\n' << std::flush;
+  }
+};
+
+template <std::size_t n>
+inline constexpr Factory<Sigmoid<n>> sigmoid;
+
+template <std::size_t n>
+struct Softmax {
+  static constexpr std::size_t num_inputs = n;
+  static constexpr std::size_t num_outputs = n;
+  template <typename T>
+  static constexpr bool params = true;
+
+  template <typename T>
+  explicit Softmax(T&&) {}
+
+  struct State {
+    float inputs[num_inputs];
+  };
+
+  //        y[i] = e^x[i] / (sum(j) of e^x[j])
+  //                v                    du/dx             - u        dv/dx
+  // dy[j]/dx[i] = ((sum(k) of e^x[k]) * (i == j) * e^x[i] - e^x[j] * e^x[i]) /
+  //               (sum(k) of e^x[k])^2
+  //             = (total * (i == j) - e^x[j]) * e^x[i] / (total * total)
+  //    dL/dx[i] = sum(j) of (dL/dy[j] * dy[j]/dx[i])
+
+  static void Apply(State& state, std::span<float, n> outputs) noexcept {
+    float total = 0;
+    for (std::size_t i = 0; i < n; i++) {
+      outputs[i] = std::exp(state.inputs[i]);
+      total += outputs[i];
+    }
+    const float factor = 1.0f / total;
+    for (std::size_t i = 0; i < n; i++) outputs[i] *= factor;
+  }
+
+  void Backpropagate(State& state, std::span<const float, n> output_gradients,
+                     std::span<float, n> input_gradients, float learning_rate) {
+    float e[n];
+    float total = 0;
+    for (std::size_t i = 0; i < n; i++) {
+      e[i] = std::exp(state.inputs[i]);
+      total += e[i];
+    }
+    const float factor = 1.0f / (total * total);
+    for (std::size_t i = 0; i < n; i++) {
+      float loss_gradient = 0;
+      for (std::size_t j = 0; j < n; j++) {
+        const float dldyj = output_gradients[j];
+        const float k = i == j ? e[i] : 1.0f;
+        const float dyjdxi = (total * (i == j) - e[j]) * e[i] * factor;
+        loss_gradient += dldyj * dyjdxi;
+      }
+      input_gradients[i] = loss_gradient;
+    }
+
+    // std::cout << "backwards: ";
+    // for (float x : input_gradients) std::cout << x << '\t';
+    // std::cout << '\n' << std::flush;
+  }
+};
+
+template <std::size_t n>
+inline constexpr Factory<Softmax<n>> softmax;
+
+template <Model M>
+void Train(M& model, std::span<const float, M::num_inputs> inputs,
+           std::span<const float, M::num_outputs> expected_outputs,
+           float learning_rate) {
+  float outputs[M::num_outputs];
+  // TODO: Figure out whether this copy can be avoided.
+  typename M::State state;
+  const std::span<float, M::num_inputs> state_inputs =
+      std::invoke(&M::State::inputs, state);
+  for (std::size_t i = 0; i < M::num_inputs; i++) state_inputs[i] = inputs[i];
+  model.Apply(state, outputs);
+
+  // std::cout << "layers:\n";
+  // std::cout << "  ";
+  // for (float x : state.a.a.a.a.a.a.a.a.b.inputs) {
+  //   std::cout << x << '\t';
+  // }
+  // std::cout << '\n';
+  // std::cout << "  ";
+  // for (float x : state.a.a.a.a.a.a.a.b.inputs) {
+  //   std::cout << x << '\t';
+  // }
+  // std::cout << '\n';
+  // std::cout << "  ";
+  // for (float x : state.a.a.a.a.a.a.b.inputs) {
+  //   std::cout << x << '\t';
+  // }
+  // std::cout << '\n';
+  // std::cout << "  ";
+  // for (float x : state.a.a.a.a.a.b.inputs) {
+  //   std::cout << x << '\t';
+  // }
+  // std::cout << '\n';
+  // std::cout << "  ";
+  // for (float x : state.a.a.a.a.b.inputs) {
+  //   std::cout << x << '\t';
+  // }
+  // std::cout << '\n';
+  // std::cout << "  ";
+  // for (float x : state.a.a.a.b.inputs) {
+  //   std::cout << x << '\t';
+  // }
+  // std::cout << '\n';
+  // std::cout << "  ";
+  // for (float x : state.a.a.b.inputs) {
+  //   std::cout << x << '\t';
+  // }
+  // std::cout << '\n';
+  // std::cout << "  ";
+  // for (float x : state.a.b.inputs) {
+  //   std::cout << x << '\t';
+  // }
+  // std::cout << '\n';
+  // std::cout << "  ";
+  // for (float x : state.b.inputs) {
+  //   std::cout << x << '\t';
+  // }
+  // std::cout << '\n';
+
+  // std::cout << "expected: ";
+  // for (std::size_t i = 0; i < M::num_outputs; i++) {
+  //   std::cout << expected_outputs[i] << '\t';
+  // }
+  // std::cout << "\nactual:   ";
+  // for (std::size_t i = 0; i < M::num_outputs; i++) {
+  //   std::cout << outputs[i] << '\t';
+  // }
+  // std::cout << "\n\n";
+
+  float gradients[M::num_outputs];
+  for (std::size_t i = 0; i < M::num_outputs; i++) {
+    // Mean squared error:
+    //   const float diff = outputs[i] - expected_outputs[i];
+    //   gradients[i] = 2 * diff;
+    // Cross entropy:
+    //        L = sum(i) of -y[i] * log(x[i])
+    // dL/dx[i] = -y[i] / x[i]
+    gradients[i] = -expected_outputs[i] / outputs[i];
+  }
+
+  // TODO: Figure out if we can avoid the redundant gradient calculation at the
+  // top level.
+  float input_gradients[M::num_inputs];
+  model.Backpropagate(state, gradients, input_gradients, learning_rate);
+
+  std::cout << "backwards: ";
+  for (float x : input_gradients) std::cout << x << '\t';
+  std::cout << '\n' << std::flush;
+}
+
+template <Model M>
+void Run(const M& model, std::span<const float, M::num_inputs> inputs,
+         std::span<float, M::num_outputs> outputs) {
+  // TODO: Figure out whether this copy can be avoided.
+  typename M::State state;
+  const std::span<float, M::num_inputs> state_inputs =
+      std::invoke(&M::State::inputs, state);
+  for (std::size_t i = 0; i < M::num_inputs; i++) state_inputs[i] = inputs[i];
+  model.Apply(state, outputs);
+}
+
+template <std::size_t n>
+requires (n != 0)
+std::size_t Select(std::span<const float, n> values) {
+  if (values.empty()) throw std::logic_error("nothing to select from");
+  return std::max_element(values.begin(), values.end()) - values.begin();
+}
+
+}  // namespace ml
+
+#endif  // MODEL_HPP_
