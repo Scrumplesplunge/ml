@@ -20,5 +20,8 @@ target_link_libraries(io mdspan)
 add_library(model src/model.hpp src/model.cpp)
 target_link_libraries(model mdspan)
 
+add_library(load_digit src/load_digit.cpp src/load_digit.hpp)
+target_link_libraries(load_digit mdspan X11)
+
 add_executable(handwriting src/handwriting.cpp)
-target_link_libraries(handwriting io mdspan model X11)
+target_link_libraries(handwriting io mdspan model load_digit)

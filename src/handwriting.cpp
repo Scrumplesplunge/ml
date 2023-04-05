@@ -1,12 +1,12 @@
-#include <CImg.h>
-
 #include <cmath>
 #include <concepts>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <random>
 
 #include "io.hpp"
+#include "load_digit.hpp"
 #include "model.hpp"
 
 namespace handwriting {
@@ -15,19 +15,6 @@ namespace {
 using Network =
     decltype(ml::linear<28 * 28, 16> | ml::sigmoid<16> | ml::linear<16, 16> |
              ml::sigmoid<16> | ml::linear<16, 10> | ml::softmax<10>)::Type;
-
-std::array<float, 28 * 28> LoadImage(
-    std::experimental::mdspan<const unsigned char,
-                              std::experimental::extents<std::size_t, 28, 28>>
-        image) {
-  std::array<float, 28 * 28> inputs;
-  for (std::size_t y = 0; y < 28; y++) {
-    for (std::size_t x = 0; x < 28; x++) {
-      inputs[28 * y + x] = image(y, x) / 255.0f;
-    }
-  }
-  return inputs;
-}
 
 void Grade(const Network& network) {
   const ml::IdxFile<unsigned char, std::dynamic_extent, 28, 28> images(
@@ -51,9 +38,9 @@ void Grade(const Network& network) {
       std::cout << "\rGrading (" << i << "/" << n << ")..." << std::flush;
     }
     const std::array<float, 28 * 28> inputs =
-        LoadImage(std::experimental::submdspan(images.contents(), i,
-                                               std::experimental::full_extent,
-                                               std::experimental::full_extent));
+        ml::LoadDigit(std::experimental::submdspan(
+            images.contents(), i, std::experimental::full_extent,
+            std::experimental::full_extent));
     float outputs[10];
     ml::Run(network, inputs, outputs);
     const int guess = ml::Select(std::span<const float, 10>(outputs));
@@ -97,7 +84,7 @@ void Train(Network& network) {
     for (std::size_t i = 0; i < n; i++) {
       const std::size_t index = 1337 * i % n;
       const std::array<float, 28 * 28> inputs =
-          LoadImage(std::experimental::submdspan(
+          ml::LoadDigit(std::experimental::submdspan(
               images.contents(), index, std::experimental::full_extent,
               std::experimental::full_extent));
       const auto label = labels(index);
@@ -151,19 +138,7 @@ void Run() {
     std::string filename("data/");
     filename.push_back(c);
     filename += ".png";
-    cimg_library::CImg<unsigned char> image(filename.c_str());
-    image.autocrop();
-    std::cout << filename << ": autocrop -> " << image.width() << 'x' << image.height() << '\n';
-    const int size = std::max(image.width(), image.height());
-    image.resize(20 * image.width() / size, 20 * image.height() / size, 1, 1,
-                 /*cubic interpolation*/5);
-    std::cout << filename << ": scaling -> " << image.width() << 'x' << image.height() << '\n';
-    cimg_library::CImg<unsigned char> canvas(28, 28, 1, 1, 0);
-    canvas.draw_image(14 - image.width() / 2, 14 - image.height() / 2, image);
-    const std::array<float, 28 * 28> inputs = LoadImage(
-        std::experimental::mdspan<
-            const unsigned char,
-            std::experimental::extents<std::size_t, 28, 28>>(canvas.data()));
+    const std::array<float, 28 * 28> inputs = ml::LoadDigit(filename.c_str());
     float outputs[10];
     ml::Run(network, inputs, outputs);
     const int guess = ml::Select(std::span<const float, 10>(outputs));
