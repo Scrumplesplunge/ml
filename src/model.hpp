@@ -220,14 +220,14 @@ template <std::size_t n>
 inline constexpr Factory<Relu<n>> relu;
 
 template <std::size_t n>
-struct Normalize {
+struct LayerNorm {
   static constexpr std::size_t num_inputs = n;
   static constexpr std::size_t num_outputs = n;
   template <typename T>
   static constexpr bool params = true;
 
   template <typename T>
-  explicit Normalize(T&&) {}
+  explicit LayerNorm(T&&) {}
 
   struct State {};
 
@@ -304,7 +304,7 @@ struct Normalize {
 };
 
 template <std::size_t n>
-inline constexpr Factory<Normalize<n>> normalize;
+inline constexpr Factory<LayerNorm<n>> layer_norm;
 
 template <std::size_t n>
 struct Sigmoid {

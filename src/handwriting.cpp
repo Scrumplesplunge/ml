@@ -13,8 +13,8 @@ namespace handwriting {
 namespace {
 
 using Network =
-    decltype(ml::linear<28 * 28, 16> | ml::normalize<16> | ml::relu<16> |
-             ml::linear<16, 16> | ml::normalize<16> | ml::relu<16> |
+    decltype(ml::linear<28 * 28, 16> | ml::layer_norm<16> | ml::relu<16> |
+             ml::linear<16, 16> | ml::layer_norm<16> | ml::relu<16> |
              ml::linear<16, 10> | ml::softmax<10>)::Type;
 
 void Grade(const Network& network) {
