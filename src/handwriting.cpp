@@ -13,8 +13,9 @@ namespace handwriting {
 namespace {
 
 using Network =
-    decltype(ml::linear<28 * 28, 16> | ml::sigmoid<16> | ml::linear<16, 16> |
-             ml::sigmoid<16> | ml::linear<16, 10> | ml::softmax<10>)::Type;
+    decltype(ml::linear<28 * 28, 16> | ml::normalize<16> | ml::relu<16> |
+             ml::linear<16, 16> | ml::normalize<16> | ml::relu<16> |
+             ml::linear<16, 10> | ml::softmax<10>)::Type;
 
 void Grade(const Network& network) {
   const ml::IdxFile<unsigned char, std::dynamic_extent, 28, 28> images(
@@ -29,10 +30,6 @@ void Grade(const Network& network) {
 
   const std::size_t n = images.extent(0);
   std::size_t correct = 0;
-  int guesses[10] = {};
-  int actual[10] = {};
-  float correct_confidence = 0;
-  float incorrect_confidence = 0;
   for (std::size_t i = 0; i < n; i++) {
     if (i % 1000 == 0) {
       std::cout << "\rGrading (" << i << "/" << n << ")..." << std::flush;
@@ -44,22 +41,9 @@ void Grade(const Network& network) {
     float outputs[10];
     ml::Run(network, inputs, outputs);
     const int guess = ml::Select(std::span<const float, 10>(outputs));
-    (guess == labels(i) ? correct_confidence : incorrect_confidence) +=
-        outputs[guess];
     if (guess == labels(i)) correct++;
-    guesses[guess]++;
-    actual[labels(i)]++;
   }
-  std::cout << "\rGrading complete: " << correct << '/' << n << " correct\n";
-  std::cout << "labels:         ";
-  for (int i = 0; i < 10; i++) std::cout << i << '\t';
-  std::cout << "\nactual:         ";
-  for (int i = 0; i < 10; i++) std::cout << actual[i] << '\t';
-  std::cout << "\nguesses:        ";
-  for (int i = 0; i < 10; i++) std::cout << guesses[i] << '\t';
-  std::cout << "\ncorrect_confidence: " << correct_confidence / correct << '\n';
-  std::cout << "incorrect_confidence: " << incorrect_confidence / (n - correct)
-            << '\n';
+  std::cout << "\rGrading complete: " << 100.0f / n * correct << "% accuracy\n";
 }
 
 void Train(Network& network) {
@@ -80,7 +64,6 @@ void Train(Network& network) {
 
   constexpr int kMaxNumEpochs = 32;
   for (int epoch = 0; epoch < kMaxNumEpochs; epoch++) {
-    int correct = 0;
     for (std::size_t i = 0; i < n; i++) {
       const std::size_t index = 1337 * i % n;
       const std::array<float, 28 * 28> inputs =
@@ -91,18 +74,12 @@ void Train(Network& network) {
       if (label > 9) throw std::runtime_error("label out of bounds");
       float expected_outputs[10] = {};
       expected_outputs[label] = 1.0f;
-      float outputs[10];
-      ml::Run(network, inputs, outputs);
-      if (ml::Select(std::span<const float, 10>(outputs)) == label) {
-        correct++;
-      }
-      constexpr float kLearningRate = 0.01;
+      constexpr float kLearningRate = 0.1;
       ml::Train(network, inputs, expected_outputs, kLearningRate);
       if (i % 1000 == 0) {
         std::cout << "\rTraining (" << i << "/" << n << ")..." << std::flush;
       }
     }
-    std::cout << "\rTraining accuracy: " << float(correct) / n << '\n';
     Grade(network);
   }
 }
