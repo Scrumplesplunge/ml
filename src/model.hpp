@@ -238,13 +238,19 @@ struct Normalize {
   //        y[i] = f[i](x) / s(x)
   // df[i]/dx[i] = -1/n + 1
   // df[j]/dx[i] = -1/n
-  //    ds/dx[i] = (x[i] - mean(x)) / s(x)                                   (*)
-  //                v      du/dx       - u         dv/dx
+  //    ds/dx[i] = (x[i] - mean(x)) / ns(x)                       (*)
   // dy[j]/dx[i] = ((i == j) - 1/n) / s(x) -
-  //               (x[i] - mean(x))(x[j] - mean(x)) / s(x)^3
-  //             = ((i == j) - 1/n) * factor -
-  //               (x[i] - mean) * (x[j] - mean) * (factor * factor * factor)
-  //    dL/dx[i] = sum(j) of (dL/dy[j] * dy[j]/dx[i])
+  //               (x[i] - mean(x))(x[j] - mean(x)) / ns(x)^3
+  //             = n * (i == j) / ns(x) -
+  //               (x[i] - mean(x))(x[j] - mean(x)) / ns(x)s(x)^2
+  //             = 1 / ns(x) * (n * (i == j) - y[i] * y[j])
+  //    dL/dx[i] = sum(j) of (
+  //                 output_loss_gradients[j] / ns(x) *
+  //                 (n * (i == j) - y[i] * y[j]))
+  //             = sum(j) of (output_loss_gradients[j] / ns(x) * n * (i == j)) -
+  //               sum(j) of (output_loss_gradients[j] / ns(x) * y[i] * y[j])
+  //             = output_loss_gradients[i] / s(x) -
+  //               y[i] / ns(x) * sum(j) of (output_loss_gradients[j] * y[j])
   //
   // (*) The proof for this doesn't fit in this comment, but involves using the
   // chain rule for sqrt(u) and u = variance(x) + epsilon.
@@ -278,17 +284,15 @@ struct Normalize {
                  std::span<const float, n> output_loss_gradients,
                  std::span<float, n> input_loss_gradients) {
     const auto [mean, factor] = Analyze(inputs);
+    float total = 0;
     for (std::size_t i = 0; i < n; i++) {
-      float loss_gradient = 0;
-      for (std::size_t j = 0; j < n; j++) {
-        const float dldyj = output_loss_gradients[j];
-        const float xi = inputs[i], xj = inputs[j];
-        const float dyjdxi = (((i == j) - 1.0f / n) -
-                              (xi - mean) * (xj - mean) * factor * factor) *
-                             factor;
-        loss_gradient += dldyj * dyjdxi;
-      }
-      input_loss_gradients[i] = loss_gradient;
+      const float y = (inputs[i] - mean) * factor;
+      input_loss_gradients[i] = y * (factor / n);
+      total += output_loss_gradients[i] * y;
+    }
+    for (std::size_t i = 0; i < n; i++) {
+      input_loss_gradients[i] =
+          output_loss_gradients[i] * factor - input_loss_gradients[i] * total;
     }
   }
 
