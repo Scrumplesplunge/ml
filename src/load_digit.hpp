@@ -3,6 +3,7 @@
 
 #include <array>
 #include <experimental/mdspan>
+#include <vector>
 
 namespace ml {
 
@@ -12,6 +13,9 @@ std::array<float, 28 * 28> LoadDigit(
         image);
 
 std::array<float, 28 * 28> LoadDigit(const char* filename);
+
+std::vector<std::array<float, 28 * 28>> LoadSprites(const char* filename,
+                                                    int size);
 
 }  // namespace ml
 

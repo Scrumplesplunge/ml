@@ -62,7 +62,8 @@ void Train(Network& network) {
 
   Grade(network);
 
-  constexpr int kMaxNumEpochs = 32;
+  constexpr int kMaxNumEpochs = 8;
+  constexpr float kLearningRate = 0.1;
   for (int epoch = 0; epoch < kMaxNumEpochs; epoch++) {
     for (std::size_t i = 0; i < n; i++) {
       const std::size_t index = 1337 * i % n;
@@ -74,7 +75,6 @@ void Train(Network& network) {
       if (label > 9) throw std::runtime_error("label out of bounds");
       float expected_outputs[10] = {};
       expected_outputs[label] = 1.0f;
-      constexpr float kLearningRate = 0.1;
       ml::Train(network, inputs, expected_outputs, kLearningRate);
       if (i % 1000 == 0) {
         std::cout << "\rTraining (" << i << "/" << n << ")..." << std::flush;
@@ -82,6 +82,23 @@ void Train(Network& network) {
     }
     Grade(network);
   }
+
+  std::cout << "Specializing on Agata's handwriting...\n";
+
+  const auto agata = ml::LoadSprites("data/agata.png", 100);
+  const auto w = agata.size() / 10;
+  for (int epoch = 0; epoch < 5 * kMaxNumEpochs; epoch++) {
+    for (int y = 0; y < 10; y++) {
+      // Skip column 1 for grading.
+      for (int x = 1; x < w; x++) {
+        float expected_outputs[10] = {};
+        expected_outputs[y] = 1.0f;
+        ml::Train(network, agata[y * w + x], expected_outputs, kLearningRate);
+      }
+    }
+  }
+
+  Grade(network);
 }
 
 Network LoadOrTrain() {
@@ -112,6 +129,8 @@ Network LoadOrTrain() {
 
 void Run() {
   const Network network = LoadOrTrain();
+  std::cout << "Model size: " << sizeof(network) / sizeof(float)
+            << " weights\n";
   std::cout << "Testing against custom inputs...\n";
   for (char c = '0'; c <= '9'; c++) {
     std::string filename("data/");
@@ -124,6 +143,18 @@ void Run() {
     std::cout << filename << ": guessed " << guess
               << " (with p=" << outputs[guess] << ")\n";
   }
+  const auto agata = ml::LoadSprites("data/agata.png", 100);
+  const auto w = agata.size() / 10;
+  int correct = 0;
+  for (int y = 0; y < 10; y++) {
+    float outputs[10];
+    ml::Run(network, agata[y * w], outputs);
+    const int guess = ml::Select(std::span<const float, 10>(outputs));
+    std::cout << "Agata '" << y << "': guessed " << guess << "\n";
+    if (guess == y) correct++;
+  }
+  std::cout << "For Agata's handwriting, guessed " << 100.0f * correct / 10
+            << "% correctly\n";
 }
 
 }  // namespace
