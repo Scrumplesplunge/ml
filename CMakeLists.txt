@@ -12,6 +12,9 @@ FetchContent_Declare(mdspan
 )
 FetchContent_MakeAvailable(mdspan)
 
+# -ffast-math literally doubles the training speed.
+add_compile_options(-ffast-math)
+
 find_package(X11)
 
 add_library(io src/io.hpp src/io.cpp)
