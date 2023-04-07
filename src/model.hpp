@@ -151,7 +151,7 @@ struct Linear {
       for (std::size_t x = 0; x < num_inputs; x++) {
         // dL/dw[j][i] = dL/dy[j] * dy[j]/dw[i]
         //             = output_gradients[j] * state.inputs[i]
-        weights[y][x] -= learning_rate * inputs[x] * output_gradients[y];
+        weights[y][x] -= learning_rate * output_gradients[y] * inputs[x];
       }
     }
 
