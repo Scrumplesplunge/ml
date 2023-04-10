@@ -40,7 +40,7 @@ void Grade(const Network& network) {
             std::experimental::full_extent));
     float outputs[10];
     ml::Run(network, inputs, outputs);
-    const int guess = ml::Select(std::span<const float, 10>(outputs));
+    const int guess = ml::Select(outputs);
     if (guess == labels(i)) correct++;
   }
   std::cout << "\rGrading complete: " << 100.0f / n * correct << "% accuracy\n";
@@ -139,7 +139,7 @@ void Run() {
     const std::array<float, 28 * 28> inputs = ml::LoadDigit(filename.c_str());
     float outputs[10];
     ml::Run(network, inputs, outputs);
-    const int guess = ml::Select(std::span<const float, 10>(outputs));
+    const int guess = ml::Select(outputs);
     std::cout << filename << ": guessed " << guess
               << " (with p=" << outputs[guess] << ")\n";
   }
@@ -149,7 +149,7 @@ void Run() {
   for (int y = 0; y < 10; y++) {
     float outputs[10];
     ml::Run(network, agata[y * w], outputs);
-    const int guess = ml::Select(std::span<const float, 10>(outputs));
+    const int guess = ml::Select(outputs);
     std::cout << "Agata '" << y << "': guessed " << guess << "\n";
     if (guess == y) correct++;
   }

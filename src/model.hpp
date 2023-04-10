@@ -1,12 +1,11 @@
 #ifndef MODEL_HPP_
 #define MODEL_HPP_
 
-#include <iostream>
-
 #include <cmath>
 #include <concepts>
 #include <experimental/mdspan>
 #include <functional>
+#include <iostream>
 #include <random>
 #include <span>
 #include <stdexcept>
@@ -14,10 +13,10 @@
 namespace ml {
 
 template <typename T>
-concept Model = requires () {
-  { T::num_inputs } -> std::same_as<const std::size_t&>;
-  { T::num_outputs } -> std::same_as<const std::size_t&>;
-};
+concept Model = requires() {
+                  { T::num_inputs } -> std::same_as<const std::size_t&>;
+                  { T::num_outputs } -> std::same_as<const std::size_t&>;
+                };
 
 template <Model T>
 struct Factory {
@@ -25,9 +24,44 @@ struct Factory {
 };
 
 template <typename T, typename M>
-concept Params = requires () {
-  requires M::template params<T>;
+concept Params = requires() { requires M::template params<T>; };
+
+template <typename T, std::size_t... dimensions>
+struct TensorView {
+  explicit TensorView(T* data) : view(data) {}
+
+  template <typename U, std::size_t n>
+  requires std::convertible_to<U(&)[], T(&)[]> && (n == (dimensions * ...))
+  TensorView(U (&data)[n]) : view(data) {}
+
+  template <typename U, std::size_t n>
+  requires std::convertible_to<U(&)[], T(&)[]> && (n == (dimensions * ...))
+  TensorView(std::array<U, n>& x) : view(x.data()) {}
+
+  template <typename U, std::size_t n>
+  requires std::convertible_to<const U (&)[], T (&)[]> &&
+           (n == (dimensions * ...))
+  TensorView(const std::array<U, n>& x) : view(x.data()) {}
+
+  template <typename U>
+  requires std::convertible_to<U(&)[], T(&)[]>
+  TensorView(TensorView<U, dimensions...> other) : view(other.view) {}
+
+  template <typename... SizeTypes>
+  decltype(auto) operator[](SizeTypes... indices) const {
+    return view(indices...);
+  }
+
+  std::experimental::mdspan<
+      T, std::experimental::extents<std::size_t, dimensions...>>
+      view;
 };
+
+template <typename T, std::size_t n>
+TensorView(T (&data)[n]) -> TensorView<T, n>;
+
+template <typename T, std::size_t n>
+TensorView(std::array<T, n>&) -> TensorView<T, n>;
 
 template <Model A, Model B>
 requires (A::num_outputs == B::num_inputs)
@@ -48,25 +82,23 @@ struct CompoundModel {
     B::State b;
   };
 
-  void Apply(State& state, std::span<const float, num_inputs> inputs,
-             std::span<float, num_outputs> outputs) const noexcept {
+  void Apply(State& state, TensorView<const float, num_inputs> inputs,
+             TensorView<float, num_outputs> outputs) const noexcept {
     a.Apply(state.a, inputs, state.hidden);
     b.Apply(state.b, state.hidden, outputs);
   }
 
-  void Backwards(State& state,
-                 std::span<const float, num_inputs> inputs,
-                 std::span<const float, num_outputs> output_loss_gradients,
-                 std::span<float, num_inputs> input_loss_gradients) {
+  void Backwards(State& state, TensorView<const float, num_inputs> inputs,
+                 TensorView<const float, num_outputs> output_loss_gradients,
+                 TensorView<float, num_inputs> input_loss_gradients) {
     float inner_gradients[A::num_outputs];
     b.Backwards(state.b, state.hidden, output_loss_gradients, inner_gradients);
     a.Backwards(state.a, inputs, inner_gradients, input_loss_gradients);
   }
 
-  void Backpropagate(State& state,
-                     std::span<const float, num_inputs> inputs,
-                     std::span<const float, num_outputs> output_gradients,
-                     std::span<float, num_inputs> input_gradients,
+  void Backpropagate(State& state, TensorView<const float, num_inputs> inputs,
+                     TensorView<const float, num_outputs> output_gradients,
+                     TensorView<float, num_inputs> input_gradients,
                      float learning_rate) {
     // TODO: This is somewhat inefficient since for a sequence of nested
     // CompoundModels it will stack up a bunch of arrays on the stack for each
@@ -90,7 +122,9 @@ consteval Factory<CompoundModel<A, B>> operator|(Factory<A>, Factory<B>) {
 }
 
 template <Model T, Params<T> P>
-constexpr T Create(Factory<T>, P&& params) { return T(params); }
+constexpr T Create(Factory<T>, P&& params) {
+  return T(params);
+}
 
 template <std::size_t i, std::size_t o>
 struct Linear {
@@ -114,9 +148,8 @@ struct Linear {
     for (auto& bias : biases) bias = f(params.generator);
   }
 
-  void Apply(State& state,
-             std::span<const float, num_inputs> inputs,
-             std::span<float, num_outputs> outputs) const noexcept {
+  void Apply(State& state, TensorView<const float, num_inputs> inputs,
+             TensorView<float, num_outputs> outputs) const noexcept {
     for (std::size_t y = 0; y < num_outputs; y++) {
       float value = biases[y];
       const float* w = weights[y];
@@ -127,10 +160,9 @@ struct Linear {
     }
   }
 
-  void Backwards(State& state,
-                 std::span<const float, num_inputs> inputs,
-                 std::span<const float, num_outputs> output_loss_gradients,
-                 std::span<float, num_inputs> input_loss_gradients) {
+  void Backwards(State& state, TensorView<const float, num_inputs> inputs,
+                 TensorView<const float, num_outputs> output_loss_gradients,
+                 TensorView<float, num_inputs> input_loss_gradients) {
     // Calculate the loss gradients with respect to the inputs.
     // dL/dx[i] = sum(j) of (dL/dy[j] * dy[j]/dx[i])
     //          = sum(j) of (output_gradients[j] * weights[j][i])
@@ -143,8 +175,8 @@ struct Linear {
     }
   }
 
-  void UpdateWeights(std::span<const float, num_inputs> inputs,
-                     std::span<const float, num_outputs> output_gradients,
+  void UpdateWeights(TensorView<const float, num_inputs> inputs,
+                     TensorView<const float, num_outputs> output_gradients,
                      float learning_rate) {
     // Update the weights.
     for (std::size_t y = 0; y < num_outputs; y++) {
@@ -163,10 +195,9 @@ struct Linear {
     }
   }
 
-  void Backpropagate(State& state,
-                     std::span<const float, num_inputs> inputs,
-                     std::span<const float, num_outputs> output_gradients,
-                     std::span<float, num_inputs> input_gradients,
+  void Backpropagate(State& state, TensorView<const float, num_inputs> inputs,
+                     TensorView<const float, num_outputs> output_gradients,
+                     TensorView<float, num_inputs> input_gradients,
                      float learning_rate) {
     // TODO: Experiment with updating the weights before calculating the
     // gradient vs. after calculating the gradient to see whether it makes
@@ -194,24 +225,25 @@ struct Relu {
 
   struct State {};
 
-  static void Apply(State& state, std::span<const float, n> inputs,
-                    std::span<float, n> outputs) noexcept {
+  static void Apply(State& state, TensorView<const float, n> inputs,
+                    TensorView<float, n> outputs) noexcept {
     for (std::size_t i = 0; i < n; i++) {
       outputs[i] = std::max<float>(0, inputs[i]);
     }
   }
 
-  void Backwards(State& state, std::span<const float, n> inputs,
-                 std::span<const float, n> output_loss_gradients,
-                 std::span<float, n> input_loss_gradients) {
+  void Backwards(State& state, TensorView<const float, n> inputs,
+                 TensorView<const float, n> output_loss_gradients,
+                 TensorView<float, n> input_loss_gradients) {
     for (std::size_t i = 0; i < n; i++) {
       input_loss_gradients[i] = inputs[i] > 0 ? output_loss_gradients[i] : 0.0f;
     }
   }
 
-  void Backpropagate(State& state, std::span<const float, n> inputs,
-                     std::span<const float, n> output_gradients,
-                     std::span<float, n> input_gradients, float learning_rate) {
+  void Backpropagate(State& state, TensorView<const float, n> inputs,
+                     TensorView<const float, n> output_gradients,
+                     TensorView<float, n> input_gradients,
+                     float learning_rate) {
     Backwards(state, inputs, output_gradients, input_gradients);
   }
 };
@@ -260,29 +292,31 @@ struct LayerNorm {
     float factor;
   };
 
-  static Components Analyze(std::span<const float, n> values) noexcept {
+  static Components Analyze(TensorView<const float, n> values) noexcept {
     float sum = 0;
-    for (float x : values) sum += x;
+    for (std::size_t i = 0; i < n; i++) sum += values[i];
     const float mean = sum / n;
     float variance_sum = 0;
-    for (float x : values) variance_sum += (x - mean) * (x - mean);
+    for (std::size_t i = 0; i < n; i++) {
+      variance_sum += (values[i] - mean) * (values[i] - mean);
+    }
     const float variance = variance_sum / n;
     constexpr float kEpsilon = 1e-3;
     const float factor = 1.0f / std::sqrt(variance + kEpsilon);
     return {.mean = mean, .factor = factor};
   }
 
-  static void Apply(State& state, std::span<const float, n> inputs,
-                    std::span<float, n> outputs) noexcept {
+  static void Apply(State& state, TensorView<const float, n> inputs,
+                    TensorView<float, n> outputs) noexcept {
     const auto [mean, factor] = Analyze(inputs);
     for (std::size_t i = 0; i < n; i++) {
       outputs[i] = (inputs[i] - mean) * factor;
     }
   }
 
-  void Backwards(State& state, std::span<const float, n> inputs,
-                 std::span<const float, n> output_loss_gradients,
-                 std::span<float, n> input_loss_gradients) {
+  void Backwards(State& state, TensorView<const float, n> inputs,
+                 TensorView<const float, n> output_loss_gradients,
+                 TensorView<float, n> input_loss_gradients) {
     const auto [mean, factor] = Analyze(inputs);
     float total = 0;
     for (std::size_t i = 0; i < n; i++) {
@@ -296,9 +330,10 @@ struct LayerNorm {
     }
   }
 
-  void Backpropagate(State& state, std::span<const float, n> inputs,
-                     std::span<const float, n> output_gradients,
-                     std::span<float, n> input_gradients, float learning_rate) {
+  void Backpropagate(State& state, TensorView<const float, n> inputs,
+                     TensorView<const float, n> output_gradients,
+                     TensorView<float, n> input_gradients,
+                     float learning_rate) {
     Backwards(state, inputs, output_gradients, input_gradients);
   }
 };
@@ -318,29 +353,30 @@ struct Sigmoid {
 
   struct State {};
 
-  static void Apply(State& state, std::span<const float, n> inputs,
-                    std::span<float, n> outputs) noexcept {
+  static void Apply(State& state, TensorView<const float, n> inputs,
+                    TensorView<float, n> outputs) noexcept {
     for (std::size_t i = 0; i < n; i++) {
-      outputs[i] = 1.0f / (1.0f + std::exp(-inputs[i]));
+      outputs(i) = 1.0f / (1.0f + std::exp(-inputs(i)));
     }
   }
 
-  void Backwards(State& state, std::span<const float, n> inputs,
-                 std::span<const float, n> output_loss_gradients,
-                 std::span<float, n> input_loss_gradients) {
+  void Backwards(State& state, TensorView<const float, n> inputs,
+                 TensorView<const float, n> output_loss_gradients,
+                 TensorView<float, n> input_loss_gradients) {
     //     y = 1 / (1 + e^-x)
     // dy/dx = ((1 + e^-x) * 0 - 1 * (-e^-x)) / (1 + e^-x)^2
     //       =                         e^-x   / (1 + e^-x)^2
     for (std::size_t i = 0; i < n; i++) {
-      const float x = std::exp(-inputs[i]);
-      input_loss_gradients[i] =
-          output_loss_gradients[i] * x / ((1 + x) * (1 + x));
+      const float x = std::exp(-inputs(i));
+      input_loss_gradients(i) =
+          output_loss_gradients(i) * x / ((1 + x) * (1 + x));
     }
   }
 
-  void Backpropagate(State& state, std::span<const float, n> inputs,
-                     std::span<const float, n> output_gradients,
-                     std::span<float, n> input_gradients, float learning_rate) {
+  void Backpropagate(State& state, TensorView<const float, n> inputs,
+                     TensorView<const float, n> output_gradients,
+                     TensorView<float, n> input_gradients,
+                     float learning_rate) {
     Backwards(state, inputs, output_gradients, input_gradients);
   }
 };
@@ -367,8 +403,8 @@ struct Softmax {
   //             = (total * (i == j) - e^x[j]) * e^x[i] / (total * total)
   //    dL/dx[i] = sum(j) of (dL/dy[j] * dy[j]/dx[i])
 
-  static void Apply(State& state, std::span<const float, n> inputs,
-                    std::span<float, n> outputs) noexcept {
+  static void Apply(State& state, TensorView<const float, n> inputs,
+                    TensorView<float, n> outputs) noexcept {
     // For numerical stability, offset everything by the maximum value. The
     // result is the same:
     //
@@ -377,7 +413,10 @@ struct Softmax {
     //
     // This ensures that we only have unboundedly negative values, which will
     // saturate to `0` rather than `inf` and avoid producing `nan`.
-    const float max = *std::max_element(inputs.begin(), inputs.end());
+    float max = inputs[0];
+    for (std::size_t i = 1; i < n; i++) {
+      if (inputs[i] > max) max = inputs[i];
+    }
     float total = 0;
     for (std::size_t i = 0; i < n; i++) {
       outputs[i] = std::exp(inputs[i] - max);
@@ -387,9 +426,9 @@ struct Softmax {
     for (std::size_t i = 0; i < n; i++) outputs[i] *= factor;
   }
 
-  void Backwards(State& state, std::span<const float, n> inputs,
-                 std::span<const float, n> output_loss_gradients,
-                 std::span<float, n> input_loss_gradients) {
+  void Backwards(State& state, TensorView<const float, n> inputs,
+                 TensorView<const float, n> output_loss_gradients,
+                 TensorView<float, n> input_loss_gradients) {
     float e[n];
     float total = 0;
     for (std::size_t i = 0; i < n; i++) {
@@ -409,9 +448,10 @@ struct Softmax {
     }
   }
 
-  void Backpropagate(State& state, std::span<const float, n> inputs,
-                     std::span<const float, n> output_gradients,
-                     std::span<float, n> input_gradients, float learning_rate) {
+  void Backpropagate(State& state, TensorView<const float, n> inputs,
+                     TensorView<const float, n> output_gradients,
+                     TensorView<float, n> input_gradients,
+                     float learning_rate) {
     Backwards(state, inputs, output_gradients, input_gradients);
   }
 };
@@ -420,8 +460,8 @@ template <std::size_t n>
 inline constexpr Factory<Softmax<n>> softmax;
 
 template <Model M>
-void Train(M& model, std::span<const float, M::num_inputs> inputs,
-           std::span<const float, M::num_outputs> expected_outputs,
+void Train(M& model, TensorView<const float, M::num_inputs> inputs,
+           TensorView<const float, M::num_outputs> expected_outputs,
            float learning_rate) {
   float outputs[M::num_outputs];
   typename M::State state;
@@ -445,18 +485,24 @@ void Train(M& model, std::span<const float, M::num_inputs> inputs,
 }
 
 template <Model M>
-void Run(const M& model, std::span<const float, M::num_inputs> inputs,
-         std::span<float, M::num_outputs> outputs) {
+void Run(const M& model, TensorView<const float, M::num_inputs> inputs,
+         TensorView<float, M::num_outputs> outputs) {
   typename M::State state;
   model.Apply(state, inputs, outputs);
 }
 
-template <std::size_t n>
-requires (n != 0)
-std::size_t Select(std::span<const float, n> values) {
-  if (values.empty()) throw std::logic_error("nothing to select from");
-  return std::max_element(values.begin(), values.end()) - values.begin();
+template <typename T, std::size_t n>
+std::size_t Select(TensorView<T, n> values) {
+  std::size_t max = 0;
+  for (std::size_t i = 1; i < n; i++) {
+    if (values[i] > values[max]) max = i;
+  }
+  return max;
 }
+
+template <typename U>
+requires requires (const U& x) { TensorView(x); }
+std::size_t Select(U& x) { return Select(TensorView(x)); }
 
 }  // namespace ml
 
