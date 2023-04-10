@@ -369,9 +369,18 @@ struct Softmax {
 
   static void Apply(State& state, std::span<const float, n> inputs,
                     std::span<float, n> outputs) noexcept {
+    // For numerical stability, offset everything by the maximum value. The
+    // result is the same:
+    //
+    //   e^a / (e^a + e^b) = e^-x / e^-x * e^a / (e^a + e^b)
+    //                     = e^(a - x) / (e^(a - x) + e^(b - x))
+    //
+    // This ensures that we only have unboundedly negative values, which will
+    // saturate to `0` rather than `inf` and avoid producing `nan`.
+    const float max = *std::max_element(inputs.begin(), inputs.end());
     float total = 0;
     for (std::size_t i = 0; i < n; i++) {
-      outputs[i] = std::exp(inputs[i]);
+      outputs[i] = std::exp(inputs[i] - max);
       total += outputs[i];
     }
     const float factor = 1.0f / total;
