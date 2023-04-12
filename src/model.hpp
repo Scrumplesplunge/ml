@@ -3,12 +3,13 @@
 
 #include <cmath>
 #include <concepts>
-#include <experimental/mdspan>
 #include <functional>
 #include <iostream>
 #include <random>
 #include <span>
 #include <stdexcept>
+
+#include "tensor.hpp"
 
 namespace ml {
 
@@ -25,43 +26,6 @@ struct Factory {
 
 template <typename T, typename M>
 concept Params = requires() { requires M::template params<T>; };
-
-template <typename T, std::size_t... dimensions>
-struct TensorView {
-  explicit TensorView(T* data) : view(data) {}
-
-  template <typename U, std::size_t n>
-  requires std::convertible_to<U(&)[], T(&)[]> && (n == (dimensions * ...))
-  TensorView(U (&data)[n]) : view(data) {}
-
-  template <typename U, std::size_t n>
-  requires std::convertible_to<U(&)[], T(&)[]> && (n == (dimensions * ...))
-  TensorView(std::array<U, n>& x) : view(x.data()) {}
-
-  template <typename U, std::size_t n>
-  requires std::convertible_to<const U (&)[], T (&)[]> &&
-           (n == (dimensions * ...))
-  TensorView(const std::array<U, n>& x) : view(x.data()) {}
-
-  template <typename U>
-  requires std::convertible_to<U(&)[], T(&)[]>
-  TensorView(TensorView<U, dimensions...> other) : view(other.view) {}
-
-  template <typename... SizeTypes>
-  decltype(auto) operator[](SizeTypes... indices) const {
-    return view(indices...);
-  }
-
-  std::experimental::mdspan<
-      T, std::experimental::extents<std::size_t, dimensions...>>
-      view;
-};
-
-template <typename T, std::size_t n>
-TensorView(T (&data)[n]) -> TensorView<T, n>;
-
-template <typename T, std::size_t n>
-TensorView(std::array<T, n>&) -> TensorView<T, n>;
 
 template <Model A, Model B>
 requires (A::num_outputs == B::num_inputs)

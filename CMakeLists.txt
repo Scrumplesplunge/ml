@@ -20,8 +20,11 @@ find_package(X11)
 add_library(io src/io.hpp src/io.cpp)
 target_link_libraries(io mdspan)
 
+add_library(tensor src/tensor.hpp src/tensor.cpp)
+target_link_libraries(tensor mdspan)
+
 add_library(model src/model.hpp src/model.cpp)
-target_link_libraries(model mdspan)
+target_link_libraries(model tensor)
 
 add_library(load_digit src/load_digit.cpp src/load_digit.hpp)
 target_link_libraries(load_digit mdspan X11)
